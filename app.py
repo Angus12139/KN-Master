@@ -39,7 +39,7 @@ interface = gr.Interface(
     fn=check_typos,
     inputs=gr.File(label="📂 上传文档 (支持 PDF / 图片)"), 
     outputs=gr.Textbox(label="AI 深度检查结果", lines=15), 
-    title="⚡ 极速全覆盖 AI 错别字雷达",                    
+    title="⚡ 极速全覆盖 AI 错别字雷达 V2.0",                    
     description="搭载原生高速上传通道！自动免疫 PDF 乱码问题，最高敏感度全面扫描！",
     submit_btn="🔍 闪电扫描",       
     clear_btn="🗑️ 清空",        
