@@ -7,26 +7,31 @@ from pptx.util import Inches, Pt
 from pptx.enum.text import PP_ALIGN
 from pptx.dml.color import RGBColor
 
-# 1. 密钥配置
+# ==========================================
+# 1. 基础配置
+# ==========================================
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model = genai.GenerativeModel('gemini-2.5-flash')
 FS_APP_ID = os.environ.get("FEISHU_APP_ID")
 FS_APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
 
 # ==========================================
-# 2. AI 语言处理
+# 2. AI 语言处理 (高敏加强版指令)
 # ==========================================
 prompt_typo = """你的唯一任务是：检查文档或图片中的【中文错别字和语病】。
-1. 哪怕只有 10% 的把握觉得某个词、某句话不对劲，也请务必指出来！
-2. 请清晰列出：“原词/原句” -> “修改建议” -> “怀疑理由”。
-3. 请忽略所有的英文内容，不要翻译，只专注于中文纠错。如果这一页没有错误,直接输出okokok,每一页都需要输出修改建议或者ok的结论"""
-prompt_proofread = "做专业的【中英双语校对】。"
-prompt_translate = "做地道的【中译英翻译】。"
+1. 请保持极高的敏感度，哪怕只有 10% 的错漏把握也请指出，宁可错杀不可放过。
+2. 请忽略文档中的纯英文内容，专注中文。
+3. 【核心输出格式】：请务必【逐页】输出检查结果。
+   - 如果该页没有任何错别字或语病，请严格输出：“第X页：OKOK”
+   - 如果该页有需要修改的地方，请清晰列出：“第X页：[原文] -> [修改建议]及原因”"""
+
+prompt_proofread = "你的唯一任务是：做专业的【中英双语校对】。对比中英文翻译是否对齐，检查英文语法和拼写。"
+prompt_translate = "你的唯一任务是：做地道的【中译英翻译】。提取内容并输出符合商务规范的纯英文结果。"
 
 def process_ai_task(file_obj, prompt_text):
     if file_obj is None: return "⚠️ 请先上传文件哦！"
     
-    # 增加：智能拦截不支持的文件格式
+    # 文件格式拦截保护
     file_name = file_obj.name.lower()
     if not (file_name.endswith('.pdf') or file_name.endswith('.png') or file_name.endswith('.jpg') or file_name.endswith('.jpeg')):
         return "❌ 格式不支持：AI 目前只长了看 PDF 和图片的“眼睛”。请把你的 PPT 或 Word 导出为 PDF 格式后再上传哦！"
@@ -39,8 +44,9 @@ def process_ai_task(file_obj, prompt_text):
         error_msg = str(e)
         if "429" in error_msg: return "⏳ 速度太快啦，请等待 1 分钟再试~"
         return f"❌ 错误: {error_msg}"
+
 # ==========================================
-# 3. 飞书 API 智能解析引擎 (核心升级区)
+# 3. 飞书 API 智能解析引擎
 # ==========================================
 def get_feishu_token():
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -52,7 +58,7 @@ def fetch_feishu_data(url_link):
     if not token: return None, "❌ 无法获取飞书授权，请检查 Secret 配置"
     headers = {"Authorization": f"Bearer {token}"}
     
-    # 1. 智能判断：是普通表格还是知识库？
+    # 智能判断链接类型
     if "/sheets/" in url_link:
         ss_token = url_link.split("/sheets/")[1].split("?")[0].split("#")[0]
         obj_type = "sheet"
@@ -60,29 +66,26 @@ def fetch_feishu_data(url_link):
         wiki_token = url_link.split("/wiki/")[1].split("?")[0].split("#")[0]
         node_url = f"https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token={wiki_token}"
         node_res = requests.get(node_url, headers=headers).json()
-        if node_res.get("code") != 0:
-            return None, f"❌ 知识库解析失败: {node_res.get('msg')}"
-        node_info = node_res.get("data", {}).get("node", {})
-        ss_token = node_info.get("obj_token")
-        obj_type = node_info.get("obj_type")
+        if node_res.get("code") != 0: return None, f"❌ 知识库解析失败: {node_res.get('msg')}"
+        ss_token = node_res.get("data", {}).get("node", {}).get("obj_token")
+        obj_type = node_res.get("data", {}).get("node", {}).get("obj_type")
     else:
         return None, "❌ 链接格式不支持，请粘贴包含 /sheets/ 或 /wiki/ 的链接。"
 
     if obj_type != "sheet":
         return None, f"❌ 抱歉，链接里装的是【{obj_type}】，本工具仅支持【电子表格】。"
 
-    # 2. 获取表格元数据，精准抓取第一页的 sheetId
+    # 获取表格第一页的 sheetId
     meta_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/metainfo"
     meta_res = requests.get(meta_url, headers=headers).json()
-    if meta_res.get("code") != 0:
-        return None, f"❌ 获取基本信息失败: {meta_res.get('msg')}"
+    if meta_res.get("code") != 0: return None, f"❌ 获取基本信息失败: {meta_res.get('msg')}"
     
     try:
         first_sheet_id = meta_res["data"]["sheets"][0]["sheetId"]
     except Exception as e:
         return None, f"❌ 解析工作表 ID 失败。飞书实际返回: {meta_res}"
 
-    # 3. 带上正确的 sheetId 去拿数据
+    # 读取表格数据
     data_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values/{first_sheet_id}!A1:Z500"
     r = requests.get(data_url, headers=headers)
     res_data = r.json()
@@ -93,7 +96,7 @@ def fetch_feishu_data(url_link):
     return res_data.get("data", {}).get("valueRange", {}).get("values", []), "OK"
 
 # ==========================================
-# 4. PPT 生成逻辑
+# 4. PPT 生成逻辑 (智能排版版)
 # ==========================================
 def link_to_pptx(link, col_letter):
     if not link: return None, "⚠️ 请输入链接"
@@ -102,7 +105,7 @@ def link_to_pptx(link, col_letter):
     
     col_index = ord(col_letter.upper()) - ord('A')
     prs = Presentation()
-    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5) # 16:9
     
     count = 0
     for row in raw_data:
@@ -114,24 +117,41 @@ def link_to_pptx(link, col_letter):
         slide.background.fill.solid()
         slide.background.fill.fore_color.rgb = RGBColor(0, 0, 0)
         
-        txBox = slide.shapes.add_textbox(0, 0, prs.slide_width, prs.slide_height)
+        # 设置安全边距，防止字出界
+        margin = Inches(0.5)
+        txBox = slide.shapes.add_textbox(margin, margin, prs.slide_width - margin*2, prs.slide_height - margin*2)
         tf = txBox.text_frame
-        tf.vertical_anchor = 1
+        tf.word_wrap = True  # 开启自动换行
+        tf.vertical_anchor = 1 # 垂直居中
+        
         p = tf.paragraphs[0]
-        p.text = content
         p.alignment = PP_ALIGN.CENTER
-        p.font.size, p.font.bold, p.font.color.rgb = Pt(60), True, RGBColor(255, 255, 255)
+        p.text = content
+        
+        # 智能字号算法
+        text_len = len(content)
+        if text_len <= 15: font_size = 100
+        elif text_len <= 40: font_size = 75
+        elif text_len <= 80: font_size = 55
+        elif text_len <= 150: font_size = 40
+        else: font_size = 32
+            
+        p.font.size = Pt(font_size)
+        p.font.bold = True
+        p.font.color.rgb = RGBColor(255, 255, 255)
+        p.font.name = '微软雅黑'
+        
         count += 1
 
-    output_name = "飞书智能提词器.pptx"
+    output_name = "发布会智能提词器.pptx"
     prs.save(output_name)
-    return output_name, f"✅ 成功穿透知识库，提取 {count} 页提词！"
+    return output_name, f"✅ 已智能排版 {count} 页提词！"
 
 # ==========================================
-# 5. 构建界面
+# 5. 整合界面
 # ==========================================
 with gr.Blocks(title="AI 智能文档工作站") as demo:
-    gr.Markdown("# 🚀 AI 智能文档工作站 V5.1 (智能解析版)")
+    gr.Markdown("# 🚀 AI 智能文档工作站 V5.3 (高敏排版版)")
     
     with gr.Tabs():
         with gr.TabItem("📝 AI 语言处理"):
@@ -149,10 +169,10 @@ with gr.Blocks(title="AI 智能文档工作站") as demo:
             btn_trans.click(fn=lambda f: process_ai_task(f, prompt_translate), inputs=ai_file, outputs=ai_output)
 
         with gr.TabItem("🎬 飞书一键转 PPT"):
-            gr.Markdown("### 支持直接粘贴普通表格 /sheets/ 或 知识库 /wiki/ 链接")
+            gr.Markdown("### 粘贴飞书表格/知识库链接，一键生成防出界提词 PPT")
             with gr.Row():
                 with gr.Column():
-                    link_input = gr.Textbox(label="1. 粘贴飞书链接", placeholder="https://xxx.feishu.cn/wiki/...")
+                    link_input = gr.Textbox(label="1. 粘贴飞书链接", placeholder="https://xxx.feishu.cn/...")
                     col_input = gr.Textbox(label="2. 题词所在列 (如 C)", value="C")
                     ppt_btn = gr.Button("🚀 立即生成 PPT", variant="primary")
                 with gr.Column():
