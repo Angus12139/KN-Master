@@ -1,2 +1,10 @@
 google-generativeai
 gradio
+python-pptx
+pandas
+openpyxl
+google-generativeai
+gradio
+python-pptx
+pandas
+openpyxl
