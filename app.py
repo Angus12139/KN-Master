@@ -22,6 +22,12 @@ prompt_translate = "做地道的【中译英翻译】。"
 
 def process_ai_task(file_obj, prompt_text):
     if file_obj is None: return "⚠️ 请先上传文件哦！"
+    
+    # 增加：智能拦截不支持的文件格式
+    file_name = file_obj.name.lower()
+    if not (file_name.endswith('.pdf') or file_name.endswith('.png') or file_name.endswith('.jpg') or file_name.endswith('.jpeg')):
+        return "❌ 格式不支持：AI 目前只长了看 PDF 和图片的“眼睛”。请把你的 PPT 或 Word 导出为 PDF 格式后再上传哦！"
+
     try:
         gemini_file = genai.upload_file(file_obj.name)
         response = model.generate_content([prompt_text, gemini_file])
@@ -30,7 +36,6 @@ def process_ai_task(file_obj, prompt_text):
         error_msg = str(e)
         if "429" in error_msg: return "⏳ 速度太快啦，请等待 1 分钟再试~"
         return f"❌ 错误: {error_msg}"
-
 # ==========================================
 # 3. 飞书 API 智能解析引擎 (核心升级区)
 # ==========================================
