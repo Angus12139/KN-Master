@@ -1,6 +1,11 @@
 import gradio as gr
 import google.generativeai as genai
 import os
+import pandas as pd
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
 
 # 1. 配置 AI 通行证
 my_api_key = os.environ.get("GEMINI_API_KEY") 
@@ -8,87 +13,80 @@ genai.configure(api_key=my_api_key)
 model = genai.GenerativeModel('gemini-2.5-flash')
 
 # ==========================================
-# 2. 为三个不同的按钮定制专属“大脑指令”
+# 2. AI 逻辑部分 (三个按钮的专属指令)
 # ==========================================
+prompt_typo = "你的唯一任务是：检查文档或图片中的【中文错别字和语病】。哪怕只有 10% 的把握也请指出。请忽略英文。"
+prompt_proofread = "你的唯一任务是：做专业的【中英双语校对】。对比中英文翻译是否对齐，检查英文语法拼写。"
+prompt_translate = "你的唯一任务是：做地道的【中译英翻译】。提取内容并输出符合商务规范的纯英文结果。"
 
-# 指令 A：纯粹的错别字检查 (保留你的高敏感度雷达要求)
-prompt_typo = """
-你的唯一任务是：检查文档或图片中的【中文错别字和语病】。
-1. 哪怕只有 10% 的把握觉得某个词、某句话不对劲，也请务必指出来！
-2. 请清晰列出：“原词/原句” -> “修改建议” -> “怀疑理由”。
-3. 请忽略所有的英文内容，不要翻译，只专注于中文纠错。
-"""
-
-# 指令 B：纯粹的中英文对照检查
-prompt_proofread = """
-你的唯一任务是：做专业的【中英双语校对】。
-1. 请对比页面上的中文和英文，检查翻译是否准确、语义是否对齐。指出漏译、误译或专业术语不一致的地方。
-2. 检查英文部分的拼写 (Spelling) 和语法 (Grammar) 错误。
-3. 如果页面上只有中文或只有英文，请提示用户：“未检测到双语对照内容”。
-4. 请用列表输出：“原文” -> “当前翻译/表达” -> “校对修改建议”。
-"""
-
-# 指令 C：全新的中译英翻译功能
-prompt_translate = """
-你的唯一任务是：做极其专业的【中译英翻译】。
-1. 请提取文档或图片中的所有中文内容。
-2. 将其翻译为极其地道、符合商务/专业规范的英文。
-3. 保持原有的段落排版格式。
-4. 不要输出任何解释性的废话，直接输出翻译好的纯英文结果。
-"""
-
-# ==========================================
-# 3. 核心处理引擎
-# ==========================================
-def process_task(file_obj, prompt_text):
-    if file_obj is None:
-        return "⚠️ 请先上传要处理的 PDF 或图片哦！"
+def process_ai_task(file_obj, prompt_text):
+    if file_obj is None: return "⚠️ 请先上传文件哦！"
     try:
-        # 上传文件到高速通道
         gemini_file = genai.upload_file(file_obj.name)
-        # 将特定的指令和文件一起发给 AI
         response = model.generate_content([prompt_text, gemini_file])
         return response.text
     except Exception as e:
-        return f"哎呀，处理时出错了: {str(e)}"
-
-# 为了配合三个按钮，我们做三个小助手函数来转交任务
-def run_typo(file): return process_task(file, prompt_typo)
-def run_proofread(file): return process_task(file, prompt_proofread)
-def run_translate(file): return process_task(file, prompt_translate)
+        error_msg = str(e)
+        if "429" in error_msg: return "⏳ 速度太快啦，请等待 1 分钟再试~"
+        return f"❌ 错误: {error_msg}"
 
 # ==========================================
-# 4. 搭积木：构建高级分屏界面
+# 3. 提词器 PPT 导出逻辑部分
+# ==========================================
+def table_to_pptx(file_obj):
+    if file_obj is None: return None, "⚠️ 请先上传表格"
+    try:
+        df = pd.read_csv(file_obj.name) if file_obj.name.endswith('.csv') else pd.read_excel(file_obj.name)
+        prs = Presentation()
+        prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+        for _, row in df.iterrows():
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            slide.background.fill.solid()
+            slide.background.fill.fore_color.rgb = RGBColor(0, 0, 0)
+            txBox = slide.shapes.add_textbox(0, 0, prs.slide_width, prs.slide_height)
+            tf = txBox.text_frame
+            tf.vertical_anchor = 1
+            p = tf.paragraphs[0]
+            p.text = str(row[0])
+            p.alignment = PP_ALIGN.CENTER
+            p.font.size, p.font.bold, p.font.color.rgb = Pt(60), True, RGBColor(255, 255, 255)
+        output_name = "发布会提词器.pptx"
+        prs.save(output_name)
+        return output_name, f"✅ 成功生成 {len(df)} 页提词！"
+    except Exception as e:
+        return None, f"❌ 失败: {str(e)}"
+
+# ==========================================
+# 4. 构建整合界面 (使用 Tabs 标签页)
 # ==========================================
 with gr.Blocks(title="AI 智能文档工作站") as demo:
-    gr.Markdown("# 🚀 AI 智能文档工作站 V3.0")
-    gr.Markdown("请先上传文件，然后点击下方对应的按钮执行您需要的专属任务。")
+    gr.Markdown("# 🚀 AI 智能文档工作站 V4.0 (完整版)")
     
-    with gr.Row():
-        # 左侧：文件上传区
-        with gr.Column(scale=1):
-            file_input = gr.File(label="📂 1. 上传 PDF 或图片")
-            
-            # 把三个按钮并排放在文件上传下方
-            gr.Markdown("### 2. 选择要执行的任务")
+    with gr.Tabs():
+        # 标签页一：AI 语言处理
+        with gr.TabItem("📝 AI 语言校对与翻译"):
             with gr.Row():
-                btn_typo = gr.Button("🇨🇳 错别字检查", variant="primary")
-                btn_proofread = gr.Button("⚖️ 中英文校对", variant="secondary")
-                btn_translate = gr.Button("🌍 中翻英翻译", variant="secondary")
-                
-            clear_btn = gr.ClearButton(value="🗑️ 清空重来")
-
-        # 右侧：结果显示区
-        with gr.Column(scale=1):
-            output_text = gr.Textbox(label="📝 3. AI 处理结果", lines=20)
+                with gr.Column():
+                    ai_file = gr.File(label="上传 PDF 或图片")
+                    with gr.Row():
+                        btn_typo = gr.Button("🇨🇳 纠错", variant="primary")
+                        btn_proof = gr.Button("⚖️ 校对", variant="secondary")
+                        btn_trans = gr.Button("🌍 翻译", variant="secondary")
+                ai_output = gr.Textbox(label="处理结果", lines=15)
             
-    # 把按钮和对应的功能绑定起来！
-    btn_typo.click(fn=run_typo, inputs=file_input, outputs=output_text)
-    btn_proofread.click(fn=run_proofread, inputs=file_input, outputs=output_text)
-    btn_translate.click(fn=run_translate, inputs=file_input, outputs=output_text)
-    
-    # 让清空按钮能同时清空上传框和结果框
-    clear_btn.add([file_input, output_text])
+            btn_typo.click(fn=lambda f: process_ai_task(f, prompt_typo), inputs=ai_file, outputs=ai_output)
+            btn_proof.click(fn=lambda f: process_ai_task(f, prompt_proofread), inputs=ai_file, outputs=ai_output)
+            btn_trans.click(fn=lambda f: process_ai_task(f, prompt_translate), inputs=ai_file, outputs=ai_output)
 
-# 启动！
+        # 标签页二：提词器自动化
+        with gr.TabItem("🎬 提词器 PPT 导出"):
+            with gr.Row():
+                table_file = gr.File(label="上传飞书导出的 Excel/CSV")
+                with gr.Column():
+                    ppt_btn = gr.Button("🔥 生成提词 PPT", variant="primary")
+                    ppt_status = gr.Markdown("状态：等待上传")
+            ppt_download = gr.File(label="下载生成的 PPT")
+            
+            ppt_btn.click(fn=table_to_pptx, inputs=table_file, outputs=[ppt_download, ppt_status])
+
 demo.launch()
