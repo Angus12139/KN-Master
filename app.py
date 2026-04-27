@@ -77,7 +77,8 @@ def fetch_feishu_data(url_link):
     res_data = r.json()
     
     if res_data.get("code") != 0:
-        return None, f"❌ 读取表格报错: {res_data.get('msg')}"
+        # 把飞书返回的所有底层细节全盘托出
+        return None, f"❌ 飞书拦截！错误码: {res_data.get('code')} \n详细信息: {res_data}"
     
     return res_data.get("data", {}).get("valueRange", {}).get("values", []), "OK"
 
