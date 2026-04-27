@@ -71,14 +71,25 @@ def fetch_feishu_data(url_link):
     if obj_type != "sheet":
         return None, f"❌ 抱歉，这个链接里装的是【{obj_type}】类型文档，本工具目前仅支持读取普通的【电子表格(sheet)】。"
 
-    # 读取电子表格 A1 到 Z500 的内容
-    data_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values/A1:Z500"
+    # 【新增步骤】：先获取表格的元数据，拿到第一个子工作表的专属 sheetId
+    meta_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/metainfo"
+    meta_res = requests.get(meta_url, headers=headers).json()
+    if meta_res.get("code") != 0:
+        return None, f"❌ 获取表格基本信息失败: {meta_res.get('msg')}"
+    
+    try:
+        # 提取第一个工作表（也就是你放题词的那一页）的 sheetId
+        first_sheet_id = meta_res["data"]["properties"]["sheet_props"][0]["sheetId"]
+    except Exception as e:
+        return None, "❌ 找不到工作表，请确保表格不是空的"
+
+    # 【修改步骤】：带上 sheetId，拼接成正确的请求范围 (比如: xxxx!A1:Z500)
+    data_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values/{first_sheet_id}!A1:Z500"
     r = requests.get(data_url, headers=headers)
     res_data = r.json()
     
     if res_data.get("code") != 0:
-        # 把飞书返回的所有底层细节全盘托出
-        return None, f"❌ 飞书拦截！错误码: {res_data.get('code')} \n详细信息: {res_data}"
+        return None, f"❌ 读取表格报错: {res_data.get('code')} - {res_data.get('msg')}"
     
     return res_data.get("data", {}).get("valueRange", {}).get("values", []), "OK"
 
