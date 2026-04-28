@@ -1,0 +1,18 @@
+name: Sync to Hugging Face Space
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  sync-to-hub:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+          lfs: true
+      - name: Push to hub
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        # 👇 注意：下面这一行需要修改为你自己的信息！
+        run: run: git push --force https://NAME:$HF_TOKEN@huggingface.co/spaces/Angus12138/00001 main
