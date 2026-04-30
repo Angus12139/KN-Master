@@ -103,6 +103,7 @@ def parse_link(url_link, token):
     return ss_token, sheet_id, "OK"
 
 # ==========================================
+# ==========================================
 # 5. 引擎 A：自动生成表格摘要并回写 D 列
 # ==========================================
 def generate_summaries_handler(link):
@@ -121,16 +122,29 @@ def generate_summaries_handler(link):
     for i, row in enumerate(raw_data):
         if len(row) > img_col:
             cell_data = row[img_col]
-            if isinstance(cell_data, list) and len(cell_data) > 0 and 'fileToken' in cell_data[0]:
-                file_token = cell_data[0]['fileToken']
+            file_token = None
+            
+            # 【核心修复】：兼容飞书的各种图片格式（纯图片字典 vs 混合列表）
+            if isinstance(cell_data, dict):
+                # 如果单元格里只有一张纯图片
+                file_token = cell_data.get('fileToken') or cell_data.get('imageToken') or cell_data.get('token')
+            elif isinstance(cell_data, list) and len(cell_data) > 0:
+                # 如果图片和文字混排，或者被包在列表里
+                for item in cell_data:
+                    if isinstance(item, dict):
+                        file_token = item.get('fileToken') or item.get('imageToken') or item.get('token')
+                        if file_token: break # 找到第一个图片就停止
+            
+            # 如果成功抓到了图片的“身份证号”
+            if file_token:
                 img_bytes = download_fs_media(file_token, token)
-                summary = get_image_summary(img_bytes)
-                if summary:
-                    update_feishu_cell(ss_token, sheet_id, i, summary, token)
-                    processed_count += 1
+                if img_bytes:
+                    summary = get_image_summary(img_bytes)
+                    if summary:
+                        update_feishu_cell(ss_token, sheet_id, i, summary, token)
+                        processed_count += 1
                     
     return f"✅ 摘要生成完毕！已成功在 D 列回写 {processed_count} 条摘要。请刷新飞书表格查看并确认。"
-
 # ==========================================
 # 6. 引擎 B：导出智能 PPT (左下角红框，C列正文，D列摘要)
 # ==========================================
