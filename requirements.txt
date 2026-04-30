@@ -1,4 +1,4 @@
-google-generativeai
+google-genai
 gradio
 python-pptx
 pandas

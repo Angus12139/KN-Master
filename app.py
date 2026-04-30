@@ -1,5 +1,6 @@
 import gradio as gr
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import os
 import requests
 import json
@@ -11,10 +12,9 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 
 # ==========================================
-# 1. 基础配置
+# 1. 基础配置 (采用全新 google.genai 规范)
 # ==========================================
-genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
-model = genai.GenerativeModel('gemini-2.5-flash')
+client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 FS_APP_ID = os.environ.get("FEISHU_APP_ID")
 FS_APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
 
@@ -37,8 +37,12 @@ def process_ai_task(file_obj, prompt_text):
     if not (file_name.endswith('.pdf') or file_name.endswith('.png') or file_name.endswith('.jpg') or file_name.endswith('.jpeg')):
         return "❌ 仅支持 PDF 或图片。请将 PPT/Word 导出为 PDF 后上传。"
     try:
-        gemini_file = genai.upload_file(file_obj.name)
-        response = model.generate_content([prompt_text, gemini_file])
+        # 新版 SDK 的文件上传与调用方式
+        gemini_file = client.files.upload(file=file_obj.name)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt_text, gemini_file]
+        )
         return response.text
     except Exception as e:
         return f"❌ 错误: {str(e)}"
@@ -50,9 +54,13 @@ def get_image_summary(image_bytes):
     """视觉识别 B 列图片并生成 5 字摘要"""
     if not image_bytes: return ""
     try:
-        img_part = {"mime_type": "image/png", "data": image_bytes}
+        # 新版 SDK 的字节流图片传递方式
+        img_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
         prompt = "这是演讲幻灯片的下一页内容，请用5个字以内总结其核心要点，作为给演讲者的‘下一页预告’提示（例如：业务增长图表、年度目标展望）"
-        response = model.generate_content([prompt, img_part])
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[prompt, img_part]
+        )
         return response.text.strip()
     except:
         return "图片解析失败"
@@ -129,4 +137,143 @@ def generate_summaries_handler(link):
 def export_ppt_handler(link, col_letter):
     if not link: return None, "⚠️ 请先粘贴链接"
     token = get_feishu_token()
-    ss_token, sheet_
+    ss_token, sheet_id, msg = parse_link(link, token)
+    if not ss_token: return None, msg
+    
+    headers = {"Authorization": f"Bearer {token}"}
+    data_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values/{sheet_id}!A1:Z500?valueRenderOption=Formula"
+    raw_data = requests.get(data_url, headers=headers).json().get("data", {}).get("valueRange", {}).get("values", [])
+    
+    col_idx = ord(col_letter.upper()) - ord('A')
+    hint_col_idx = ord('D') - ord('A')
+    
+    prs = Presentation()
+    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
+    
+    valid_rows = [r for r in raw_data if len(r) > col_idx]
+    
+    for i in range(len(valid_rows)):
+        row = valid_rows[i]
+        
+        # A. 正文处理 (C列)
+        content_obj = row[col_idx]
+        full_text = ""
+        segments = []
+        if isinstance(content_obj, list):
+            segments = content_obj
+            for s in segments: full_text += s.get('text', '')
+        else:
+            full_text = str(content_obj).strip()
+            if full_text in ["None", "", "nan"]: continue
+            segments = [{'text': full_text, 'segmentStyle': {'foreColor': '#FFFFFF'}}]
+
+        if not full_text.strip(): continue
+
+        # B. 查找下一页提示 (下一行的 D 列)
+        next_hint = "演讲结束"
+        if i + 1 < len(valid_rows):
+            next_row = valid_rows[i+1]
+            if len(next_row) > hint_col_idx:
+                hint_val = next_row[hint_col_idx]
+                if isinstance(hint_val, list):
+                    next_hint = "".join([s.get('text','') for s in hint_val]).strip()
+                else:
+                    next_hint = str(hint_val).strip()
+                
+                if not next_hint or next_hint == "None":
+                    next_hint = "演讲结束"
+
+        # C. 渲染 Slide
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide.background.fill.solid()
+        slide.background.fill.fore_color.rgb = RGBColor(0, 0, 0)
+        
+        margin = Inches(0.8)
+        txBox = slide.shapes.add_textbox(margin, margin, prs.slide_width - margin*2, prs.slide_height - Inches(2))
+        tf = txBox.text_frame
+        tf.word_wrap = True
+        tf.vertical_anchor = 1 
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.LEFT
+        
+        text_len = len(full_text)
+        font_size = 80 if text_len <= 20 else 60 if text_len <= 60 else 40
+        
+        for seg in segments:
+            run = p.add_run()
+            run.text = seg.get('text', '')
+            run.font.name, run.font.size = '微软雅黑', Pt(font_size)
+            run.font.bold = seg.get('segmentStyle', {}).get('bold', True)
+            c = seg.get('segmentStyle', {}).get('foreColor', '#FFFFFF')
+            if c.upper() in ["#000000", "#121212"]: run.font.color.rgb = RGBColor(255, 255, 255)
+            else:
+                try: 
+                    hex_c = c.lstrip('#')
+                    run.font.color.rgb = RGBColor(*(int(hex_c[k:k+2], 16) for k in (0, 2, 4)))
+                except: run.font.color.rgb = RGBColor(255, 255, 255)
+
+        # D. 左下角红色预告框
+        box_w, box_h = Inches(5.0), Inches(0.6)
+        shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, margin, prs.slide_height - Inches(1.2), box_w, box_h)
+        shape.fill.solid()
+        shape.fill.fore_color.rgb = RGBColor(225, 29, 72)
+        shape.line.fill.background()
+        
+        tf_h = shape.text_frame
+        tf_h.vertical_anchor = 1
+        ph = tf_h.paragraphs[0]
+        ph.alignment = PP_ALIGN.LEFT
+        rh = ph.add_run()
+        rh.text = f" 下一页预告：{next_hint}"
+        rh.font.name, rh.font.size, rh.font.bold = '微软雅黑', Pt(20), True
+        rh.font.color.rgb = RGBColor(255, 255, 255)
+
+    out = "V5.6_智能预测提词器.pptx"
+    prs.save(out)
+    return out, f"✅ 已成功导出 {len(valid_rows)} 页带下一页预告的 PPT！"
+
+# ==========================================
+# 7. UI 界面整合
+# ==========================================
+with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
+    gr.Markdown("# 🚀 AI 智能文档工作站 V5.6 (全能版)")
+    
+    with gr.Tabs():
+        # --- 保留的 Tab 1：纠错校对 ---
+        with gr.TabItem("📝 AI 语言处理"):
+            with gr.Row():
+                with gr.Column():
+                    ai_file = gr.File(label="上传 PDF 或图片")
+                    with gr.Row():
+                        btn_typo = gr.Button("🇨🇳 逐页纠错", variant="primary")
+                        btn_proof = gr.Button("⚖️ 双语校对", variant="secondary")
+                        btn_trans = gr.Button("🌍 翻译结果", variant="secondary")
+                ai_output = gr.Textbox(label="AI 处理结果", lines=20)
+            
+            btn_typo.click(fn=lambda f: process_ai_task(f, prompt_typo), inputs=ai_file, outputs=ai_output)
+            btn_proof.click(fn=lambda f: process_ai_task(f, prompt_proofread), inputs=ai_file, outputs=ai_output)
+            btn_trans.click(fn=lambda f: process_ai_task(f, prompt_translate), inputs=ai_file, outputs=ai_output)
+
+        # --- 全新的 Tab 2：飞书双引擎 ---
+        with gr.TabItem("🎬 飞书一键转 PPT"):
+            gr.Markdown("### 双步工作流：1. 读取 B 列图片生成摘要写回 D 列 ➡️ 2. 读取 C 列正文与下页 D 列生成 PPT")
+            with gr.Row():
+                link_input = gr.Textbox(label="第一步：粘贴飞书链接 (Sheet/Wiki)", placeholder="https://...")
+                col_input = gr.Textbox(label="正文所在列 (默认 C 列)", value="C")
+
+            with gr.Row():
+                with gr.Column():
+                    gr.Markdown("### 🛠 引擎 A：表格内容生产")
+                    summary_btn = gr.Button("🤖 识别图片生成提示词 (将结果写入 D 列)", variant="secondary")
+                    summary_status = gr.Markdown("状态：等待指令")
+                
+                with gr.Column():
+                    gr.Markdown("### 🚀 引擎 B：PPT 智能导出")
+                    export_btn = gr.Button("🔥 立即导出智能预测 PPT", variant="primary")
+                    ppt_file = gr.File(label="下载导出的 PPT")
+                    export_status = gr.Markdown("状态：等待指令")
+
+            summary_btn.click(fn=generate_summaries_handler, inputs=link_input, outputs=summary_status)
+            export_btn.click(fn=export_ppt_handler, inputs=[link_input, col_input], outputs=[ppt_file, export_status])
+
+demo.launch()
