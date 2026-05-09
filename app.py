@@ -112,39 +112,63 @@ def generate_summaries_handler(link):
     ss_token, sheet_id, msg = parse_link(link, token)
     if not ss_token: return msg
     
+    # 增加调试日志
+    print(f"开始处理表格: {ss_token}, 工作表: {sheet_id}")
+    
+    # 强制读取 A1 到 Z500，确保覆盖范围
     data_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values/{sheet_id}!A1:Z500?valueRenderOption=Formula"
     headers = {"Authorization": f"Bearer {token}"}
     raw_data = requests.get(data_url, headers=headers).json().get("data", {}).get("valueRange", {}).get("values", [])
     
+    if not raw_data: return "❌ 无法读取表格内容，请检查权限。"
+
     processed_count = 0
-    img_col = ord('B') - ord('A')
+    # 我们不再完全相信 B 列一定是索引 1，我们遍历前几列去“搜寻”图片
+    # 或者如果你确定是 B 列，请确保 img_col = 1
+    img_col = 1 
     
     for i, row in enumerate(raw_data):
-        if len(row) > img_col:
-            cell_data = row[img_col]
-            file_token = None
+        # 即使行长度不够，我们也补齐它，防止漏掉
+        if len(row) <= img_col:
+            continue
             
-            # 【核心修复】：兼容飞书的各种图片格式（纯图片字典 vs 混合列表）
-            if isinstance(cell_data, dict):
-                # 如果单元格里只有一张纯图片
-                file_token = cell_data.get('fileToken') or cell_data.get('imageToken') or cell_data.get('token')
-            elif isinstance(cell_data, list) and len(cell_data) > 0:
-                # 如果图片和文字混排，或者被包在列表里
-                for item in cell_data:
-                    if isinstance(item, dict):
-                        file_token = item.get('fileToken') or item.get('imageToken') or item.get('token')
-                        if file_token: break # 找到第一个图片就停止
-            
-            # 如果成功抓到了图片的“身份证号”
-            if file_token:
-                img_bytes = download_fs_media(file_token, token)
-                if img_bytes:
-                    summary = get_image_summary(img_bytes)
-                    if summary:
-                        update_feishu_cell(ss_token, sheet_id, i, summary, token)
-                        processed_count += 1
-                    
-    return f"✅ 摘要生成完毕！已成功在 D 列回写 {processed_count} 条摘要。请刷新飞书表格查看并确认。"
+        cell_data = row[img_col]
+        file_token = None
+        
+        # --- 深度提取 Token 逻辑 ---
+        def find_token(data):
+            """递归搜索数据中的图片 Token"""
+            if isinstance(data, dict):
+                # 飞书 JPG 图片常用的几个 Key
+                for key in ['fileToken', 'imageToken', 'token', 'file_token']:
+                    if data.get(key): return data.get(key)
+                # 如果字典里还有列表（比如多附件），递归进去
+                for val in data.values():
+                    res = find_token(val)
+                    if res: return res
+            elif isinstance(data, list):
+                for item in data:
+                    res = find_token(item)
+                    if res: return res
+            return None
+
+        file_token = find_token(cell_data)
+        
+        if file_token:
+            print(f"第 {i+1} 行发现图片 Token: {file_token}")
+            img_bytes = download_fs_media(file_token, token)
+            if img_bytes:
+                summary = get_image_summary(img_bytes)
+                if summary:
+                    update_feishu_cell(ss_token, sheet_id, i, summary, token)
+                    processed_count += 1
+            else:
+                print(f"第 {i+1} 行图片下载失败，请检查下载权限。")
+        else:
+            # 只有在真的找不到时才打印，避免刷屏
+            if i < 5: print(f"第 {i+1} 行 B 列内容预览: {cell_data}")
+
+    return f"✅ 处理完毕！成功在 D 列回写 {processed_count} 条摘要。如果依然为 0，请查看 VS Code 终端打印的‘内容预览’。"
 # ==========================================
 # 6. 引擎 B：导出智能 PPT (左下角红框，C列正文，D列摘要)
 # ==========================================
