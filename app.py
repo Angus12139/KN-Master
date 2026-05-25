@@ -37,29 +37,30 @@ def process_ai_task(file_obj, prompt_text):
     if not (file_name.endswith('.pdf') or file_name.endswith('.png') or file_name.endswith('.jpg') or file_name.endswith('.jpeg')):
         return "❌ 仅支持 PDF 或图片。请将 PPT/Word 导出为 PDF 后上传。"
     
-    # 【核心修复】：提取后缀，创建一个绝对纯英文的临时文件路径
-    ext = file_name[file_name.rfind('.'):]
-    temp_safe_path = "temp_ai_file" + ext
-    
     try:
-        # 用二进制方式，把用户传的文件（无论名字有没有中文）复制到纯英文路径下
-        with open(file_obj.name, 'rb') as f_in:
-            with open(temp_safe_path, 'wb') as f_out:
-                f_out.write(f_in.read())
-                
-        # 上传纯英文命名的临时文件，完美避开 ASCII 报错
-        gemini_file = client.files.upload(file=temp_safe_path)
+        # 1. 智能推断文件的 MIME 类型
+        if file_name.endswith('.pdf'):
+            mime_type = 'application/pdf'
+        elif file_name.endswith(('.jpg', '.jpeg')):
+            mime_type = 'image/jpeg'
+        else:
+            mime_type = 'image/png'
+            
+        # 2. 直接在本地读取文件的二进制流，绕过 Google 的文件上传服务器
+        with open(file_obj.name, 'rb') as f:
+            file_bytes = f.read()
+            
+        # 3. 将二进制流打包成 AI 认识的格式（完美避开名称报错和处理延迟报错）
+        file_part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
+        
+        # 4. 一次性打包发送给 AI（建议把文件放在提示词前面）
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[prompt_text, gemini_file]
+            contents=[file_part, prompt_text]
         )
         return response.text
     except Exception as e:
         return f"❌ 错误: {str(e)}"
-    finally:
-        # 打扫战场：无论成功失败，最后都把临时文件删掉，保持服务器干净
-        if os.path.exists(temp_safe_path):
-            os.remove(temp_safe_path)
 
 # ==========================================
 # 3. AI 视觉理解核心 (用于飞书图片摘要)
