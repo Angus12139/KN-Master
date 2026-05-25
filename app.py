@@ -23,7 +23,7 @@ prompt_typo = """你的唯一任务是：检查文档或图片中的【中文错
 2. 请忽略文档中的纯英文内容，专注中文。
 3. 【核心输出格式】：请务必【逐页】输出检查结果。
    - 如果该页没有任何错别字或语病，请严格输出：“第X页：OKOK”
-   - If there are areas to change, clearly list them as: “第X页：[原文] -> [修改建议]及原因”"""
+   - 如果该页有需要修改的地方，请清晰列出：“第X页：[原文] -> [修改建议]及原因”"""
 
 prompt_proofread = "做专业的【中英双语校对】。对比中英文翻译是否对齐，检查英文语法和拼写。"
 prompt_translate = "做地道的【中译英翻译】。提取内容并输出符合商务规范的纯英文结果。"
@@ -52,24 +52,20 @@ def process_ai_task(file_obj, prompt_text):
         return f"❌ 错误: {str(e)}"
 
 # ==========================================
-# 3. AI 视觉理解核心 (【深度优化】消灭解析失败)
+# 3. AI 视觉理解核心 (【深度优化】带详细报错跟踪)
 # ==========================================
 def get_image_summary(image_bytes):
-    """视觉识别 B 列图片并生成极致精简摘要（智能格式探测 + 3次抗波动重试）"""
-    if not image_bytes: return ""
+    """视觉识别 B 列图片并生成极致精简摘要（带防封锁控速机制）"""
+    if not image_bytes: return "ERROR: 空图片流"
     
-    # 【核心修复1】：智能嗅探图片真实格式，拒绝硬编码带来的 400 校验错误
-    mime_type = "image/jpeg" # 默认兜底
-    if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
-        mime_type = "image/png"
-    elif image_bytes.startswith(b'RIFF') and b'WEBP' in image_bytes[:16]:
-        mime_type = "image/webp"
-    elif image_bytes.startswith(b'GIF8'):
-        mime_type = "image/gif"
+    mime_type = "image/jpeg"
+    if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'): mime_type = "image/png"
+    elif image_bytes.startswith(b'RIFF') and b'WEBP' in image_bytes[:16]: mime_type = "image/webp"
+    elif image_bytes.startswith(b'GIF8'): mime_type = "image/gif"
 
+    last_error = ""
     try:
         img_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
-        
         prompt = """
         这是演讲幻灯片的下一页图片，请提取它的核心演讲主题，用于提词器。
         必须严格遵守以下 3 条铁律：
@@ -79,7 +75,7 @@ def get_image_summary(image_bytes):
         正确示例：年度销售数据盘点
         """
         
-        # 【核心修复2】：内置 3 次自动重试机制，强力抵抗网络抖动与接口频控
+        # 3次重试抗波动机制，每次失败休息更长时间
         for attempt in range(3):
             try:
                 response = client.models.generate_content(
@@ -89,23 +85,24 @@ def get_image_summary(image_bytes):
                 result = response.text.strip()
                 
                 # 物理洗刷废话
-                prefixes_to_remove = ["图片展示了", "核心是", "这张图", "核心内容是", "下一页内容是", "主要展示", "总结：", "提示："]
-                for prefix in prefixes_to_remove:
-                    if result.startswith(prefix):
-                        result = result[len(prefix):]
+                for prefix in ["图片展示了", "核心是", "这张图", "核心内容是", "下一页内容是", "主要展示", "总结：", "提示："]:
+                    if result.startswith(prefix): result = result[len(prefix):]
                         
                 # 剃光标点
                 result = re.sub(r'[^\w\u4e00-\u9fa5]', '', result)
                 if len(result) > 10: result = result[:10]
+                
+                # 防止正则洗完后变成空字符串
+                if not result: return "无有效文本"
+                
                 return result
             except Exception as api_err:
-                print(f"Gemini 接口第 {attempt+1} 次尝试失败: {api_err}")
-                time.sleep(1.5) # 稍微静置后重试
+                last_error = str(api_err)
+                time.sleep(3) # 失败后冷却 3 秒
                 
-        return "解析失败"
+        return f"ERROR: API超载或报错 ({last_error})"
     except Exception as e:
-        print(f"图片参数封装失败: {e}")
-        return "解析失败"
+        return f"ERROR: 数据封装失败 ({e})"
 
 # ==========================================
 # 4. 飞书数据底座
@@ -144,38 +141,44 @@ def parse_link(url_link, token):
     return ss_token, sheet_id, "OK"
 
 # ==========================================
-# 5. 🛠 引擎 A：【流式动态反馈版】自动生成表格摘要并回写 D 列
+# 5. 🛠 引擎 A：【滚动日志 + 控速版】自动生成表格摘要并回写
 # ==========================================
 def generate_summaries_handler(link):
+    # 建立一个日记本，记录每一步的操作，让用户看清楚
+    logs = []
+    def update_ui(msg):
+        logs.append(msg)
+        # 只显示最后 12 条日志，防止界面过长，用换行符连接
+        return "\n\n".join(logs[-12:])
+        
     if not link:
-        yield "⚠️ 请先粘贴链接"
+        yield update_ui("⚠️ 错误：请先粘贴链接！")
         return
     
-    # 使用 yield 实现即时视觉反馈
-    yield "🔄 [1/4] 正在获取飞书云端安全授权..."
+    yield update_ui("🔄 [步骤 1] 正在获取飞书云端安全授权...")
     token = get_feishu_token()
     
-    yield "🔄 [2/4] 正在穿透多维表格/知识库节点..."
+    yield update_ui("🔄 [步骤 2] 正在穿透多维表格节点...")
     ss_token, sheet_id, msg = parse_link(link, token)
     if not ss_token:
-        yield f"❌ 连接失败: {msg}"
+        yield update_ui(f"❌ 连接失败: {msg}")
         return
     
-    yield "🔄 [3/4] 正在拉取 A1:Z500 全量数据矩阵..."
+    yield update_ui("🔄 [步骤 3] 正在拉取全量数据...")
     data_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values/{sheet_id}!A1:Z500?valueRenderOption=Formula"
     headers = {"Authorization": f"Bearer {token}"}
     raw_data = requests.get(data_url, headers=headers).json().get("data", {}).get("valueRange", {}).get("values", [])
     
     if not raw_data:
-        yield "❌ 未能在该工作表中读取到有效数据，请检查文档是否为空或机器人权限。"
+        yield update_ui("❌ 未读取到有效数据。")
         return
 
     processed_count = 0
     img_col = 1 # B 列
     total_rows = len(raw_data)
     
-    yield f"📊 [4/4] 成功加载！共发现 {total_rows} 行数据。开始启动 AI 视觉引擎逐行解析..."
-    time.sleep(0.5)
+    yield update_ui(f"✅ 成功加载！共发现 {total_rows} 行数据。准备启动 AI 解析...")
+    time.sleep(1)
 
     for i, row in enumerate(raw_data):
         if len(row) <= img_col: continue
@@ -199,28 +202,29 @@ def generate_summaries_handler(link):
         file_token = find_token(cell_data)
         
         if file_token:
-            # 动态反馈正在处理哪一行，让用户心中有数
-            yield f"⏳ 正在深度解析第 {i+1}/{total_rows} 行的单元格图片..."
+            yield update_ui(f"⏳ 正在处理第 {i+1} 行图片...")
             img_bytes = download_fs_media(file_token, token)
+            
             if img_bytes:
                 summary = get_image_summary(img_bytes)
-                # 只有真正生成了有效文字才写回，防止用“解析失败”四个字污染用户的干净表格
-                if summary and summary != "解析失败":
+                
+                if summary.startswith("ERROR"):
+                    yield update_ui(f"⚠️ 第 {i+1} 行跳过：{summary}")
+                else:
                     update_feishu_cell(ss_token, sheet_id, i, summary, token)
                     processed_count += 1
-                    yield f"✨ 进展：第 {i+1} 行图片成功识别为 ➡️【{summary}】"
-                else:
-                    yield f"⚠️ 警告：第 {i+1} 行图片多轮重试后依然无法识别，已安全跳过。"
-            else:
-                yield f"❌ 阻碍：第 {i+1} 行图片文件流下载失败，请检查飞书后台‘导出附件’权限。"
-        
-        # 引入 0.2 秒科学微休眠，优雅规避并发频控
-        time.sleep(0.2)
+                    yield update_ui(f"✨ 第 {i+1} 行成功写入 ➡️ 【{summary}】")
                     
-    yield f"🎉 **全篇大功告成！** 成功在 D 列回写了 {processed_count} 条极致精简的下一页提示词。请刷新飞书表格查阅！"
+                    # 【核心修复】：成功后强制休息 4 秒，防止触发 Google 的 15 RPM 频控报错
+                    yield update_ui(f"⏸️ 为防止接口封锁，安全冷却 4 秒钟...")
+                    time.sleep(4)
+            else:
+                yield update_ui(f"❌ 第 {i+1} 行：图片下载失败，请检查飞书附件权限。")
+                    
+    yield update_ui(f"🎉 大功告成！全篇共在 D 列回写了 {processed_count} 条精简摘要。")
 
 # ==========================================
-# 6. 🚀 引擎 B：导出智能 PPT (C列正文，下行D列摘要)
+# 6. 🚀 引擎 B：导出智能 PPT
 # ==========================================
 def export_ppt_handler(link, col_letter):
     if not link: return None, "⚠️ 请先粘贴链接"
@@ -268,7 +272,7 @@ def export_ppt_handler(link, col_letter):
                 else:
                     next_hint = str(hint_val).strip()
                 
-                if not next_hint or next_hint == "None" or next_hint == "解析失败":
+                if not next_hint or next_hint == "None":
                     next_hint = "演讲结束"
 
         # C. 渲染 Slide
@@ -324,10 +328,9 @@ def export_ppt_handler(link, col_letter):
 # 7. UI 界面整合
 # ==========================================
 with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
-    gr.Markdown("# 🚀 AI 智能文档工作站 V5.6 (高阶反馈版)")
+    gr.Markdown("# 🚀 AI 智能文档工作站 V5.6 (安全滚动日志版)")
     
     with gr.Tabs():
-        # --- Tab 1：纠错校对 ---
         with gr.TabItem("📝 AI 语言处理"):
             with gr.Row():
                 with gr.Column():
@@ -342,7 +345,6 @@ with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
             btn_proof.click(fn=lambda f: process_ai_task(f, prompt_proofread), inputs=ai_file, outputs=ai_output)
             btn_trans.click(fn=lambda f: process_ai_task(f, prompt_translate), inputs=ai_file, outputs=ai_output)
 
-        # --- Tab 2：飞书双引擎 ---
         with gr.TabItem("🎬 飞书一键转 PPT"):
             gr.Markdown("### 双步工作流：1. 读取 B 列图片生成摘要写回 D 列 ➡️ 2. 读取 C 列正文与下页 D 列生成 PPT")
             with gr.Row():
@@ -352,8 +354,9 @@ with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
             with gr.Row():
                 with gr.Column():
                     gr.Markdown("### 🛠 引擎 A：表格内容生产")
-                    summary_btn = gr.Button("🤖 识别图片生成提示词 (将结果写入 D 列)", variant="secondary")
-                    summary_status = gr.Markdown("状态：等待指令")
+                    summary_btn = gr.Button("🤖 识别图片生成提示词 (自动写入 D 列)", variant="secondary")
+                    # 将状态提示框改为多行文本显示，更直观
+                    summary_status = gr.Markdown("状态：等待指令（运行时将显示滚动日志）")
                 
                 with gr.Column():
                     gr.Markdown("### 🚀 引擎 B：PPT 智能导出")
@@ -361,7 +364,6 @@ with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
                     ppt_file = gr.File(label="下载导出的 PPT")
                     export_status = gr.Markdown("状态：等待指令")
 
-            # 注意：此处 generate_summaries_handler 升级为流式生成器，会自动刷新状态框
             summary_btn.click(fn=generate_summaries_handler, inputs=link_input, outputs=summary_status)
             export_btn.click(fn=export_ppt_handler, inputs=[link_input, col_input], outputs=[ppt_file, export_status])
 
