@@ -1,3 +1,4 @@
+import re
 import gradio as gr
 from google import genai
 from google.genai import types
@@ -65,21 +66,51 @@ def process_ai_task(file_obj, prompt_text):
 # ==========================================
 # 3. AI 视觉理解核心 (用于飞书图片摘要)
 # ==========================================
+# ==========================================
+# 3. AI 视觉理解核心 (用于飞书图片摘要 - 极致精简版)
+# ==========================================
 def get_image_summary(image_bytes):
-    """视觉识别 B 列图片并生成 5 字摘要"""
+    """视觉识别 B 列图片并生成极致精简摘要（10字以内，无标点）"""
     if not image_bytes: return ""
     try:
-        # 新版 SDK 的字节流图片传递方式
         img_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
-        prompt = "这是演讲幻灯片的下一页内容，请用5个字以内总结其核心要点，作为给演讲者的‘下一页预告’提示（例如：业务增长图表、年度目标展望）"
+        
+        # 1. 魔法强化：用铁律约束 AI
+        prompt = """
+        这是演讲幻灯片的下一页图片，请提取它的核心演讲主题，用于提词器。
+        必须严格遵守以下 3 条铁律：
+        1. 字数绝对控制在 10 个字以内！
+        2. 绝对不要使用任何标点符号（包括句号、逗号、冒号等）！
+        3. 直接输出核心词，绝不能出现“这张图片展示了”、“核心内容是”等废话。
+        正确示例：年度销售数据盘点
+        错误示例：这张图是关于年度销售数据的。
+        """
+        
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[prompt, img_part]
         )
-        return response.text.strip()
-    except:
-        return "图片解析失败"
-
+        
+        # 2. 物理净化：拿到结果后，用代码强行洗掉所有标点和废话
+        result = response.text.strip()
+        
+        # 过滤掉常见的前缀废话
+        prefixes_to_remove = ["图片展示了", "核心是", "这张图", "核心内容是", "下一页内容是", "主要展示", "总结：", "提示："]
+        for prefix in prefixes_to_remove:
+            if result.startswith(prefix):
+                result = result[len(prefix):]
+                
+        # 使用正则表达式：只保留中文字符、英文字母和数字，强制干掉所有标点符号和空格换行
+        result = re.sub(r'[^\w\u4e00-\u9fa5]', '', result)
+        
+        # 强制截断：宁可少字，绝不多字，严格控制在 10 字以内
+        if len(result) > 10:
+            result = result[:10]
+            
+        return result
+    except Exception as e:
+        print(f"解析错误: {e}")
+        return "解析失败"
 # ==========================================
 # 4. 飞书数据引擎 (读取与回写)
 # ==========================================
