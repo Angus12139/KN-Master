@@ -1,4 +1,3 @@
-import re
 import gradio as gr
 from google import genai
 from google.genai import types
@@ -6,28 +5,25 @@ import os
 import requests
 import json
 import io
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.enum.text import PP_ALIGN
-from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE
+import re
+import time
 
 # ==========================================
-# 1. 基础配置 (采用全新 google.genai 规范)
+# 1. 基础配置
 # ==========================================
 client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 FS_APP_ID = os.environ.get("FEISHU_APP_ID")
 FS_APP_SECRET = os.environ.get("FEISHU_APP_SECRET")
 
 # ==========================================
-# 2. AI 语言处理 (保留原有全部功能)
+# 2. AI 语言处理 (Tab 1 核心功能全面保留)
 # ==========================================
 prompt_typo = """你的唯一任务是：检查文档或图片中的【中文错别字和语病】。
 1. 请保持极高的敏感度，哪怕只有 10% 的错漏把握也请指出，宁可错杀不可放过。
 2. 请忽略文档中的纯英文内容，专注中文。
 3. 【核心输出格式】：请务必【逐页】输出检查结果。
    - 如果该页没有任何错别字或语病，请严格输出：“第X页：OKOK”
-   - 如果该页有需要修改的地方，请清晰列出：“第X页：[原文] -> [修改建议]及原因”"""
+   - If there are areas to change, clearly list them as: “第X页：[原文] -> [修改建议]及原因”"""
 
 prompt_proofread = "做专业的【中英双语校对】。对比中英文翻译是否对齐，检查英文语法和拼写。"
 prompt_translate = "做地道的【中译英翻译】。提取内容并输出符合商务规范的纯英文结果。"
@@ -39,22 +35,14 @@ def process_ai_task(file_obj, prompt_text):
         return "❌ 仅支持 PDF 或图片。请将 PPT/Word 导出为 PDF 后上传。"
     
     try:
-        # 1. 智能推断文件的 MIME 类型
-        if file_name.endswith('.pdf'):
-            mime_type = 'application/pdf'
-        elif file_name.endswith(('.jpg', '.jpeg')):
-            mime_type = 'image/jpeg'
-        else:
-            mime_type = 'image/png'
+        if file_name.endswith('.pdf'): mime_type = 'application/pdf'
+        elif file_name.endswith(('.jpg', '.jpeg')): mime_type = 'image/jpeg'
+        else: mime_type = 'image/png'
             
-        # 2. 直接在本地读取文件的二进制流，绕过 Google 的文件上传服务器
         with open(file_obj.name, 'rb') as f:
             file_bytes = f.read()
             
-        # 3. 将二进制流打包成 AI 认识的格式（完美避开名称报错和处理延迟报错）
         file_part = types.Part.from_bytes(data=file_bytes, mime_type=mime_type)
-        
-        # 4. 一次性打包发送给 AI（建议把文件放在提示词前面）
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=[file_part, prompt_text]
@@ -64,18 +52,24 @@ def process_ai_task(file_obj, prompt_text):
         return f"❌ 错误: {str(e)}"
 
 # ==========================================
-# 3. AI 视觉理解核心 (用于飞书图片摘要)
-# ==========================================
-# ==========================================
-# 3. AI 视觉理解核心 (用于飞书图片摘要 - 极致精简版)
+# 3. AI 视觉理解核心 (【深度优化】消灭解析失败)
 # ==========================================
 def get_image_summary(image_bytes):
-    """视觉识别 B 列图片并生成极致精简摘要（10字以内，无标点）"""
+    """视觉识别 B 列图片并生成极致精简摘要（智能格式探测 + 3次抗波动重试）"""
     if not image_bytes: return ""
+    
+    # 【核心修复1】：智能嗅探图片真实格式，拒绝硬编码带来的 400 校验错误
+    mime_type = "image/jpeg" # 默认兜底
+    if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        mime_type = "image/png"
+    elif image_bytes.startswith(b'RIFF') and b'WEBP' in image_bytes[:16]:
+        mime_type = "image/webp"
+    elif image_bytes.startswith(b'GIF8'):
+        mime_type = "image/gif"
+
     try:
-        img_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+        img_part = types.Part.from_bytes(data=image_bytes, mime_type=mime_type)
         
-        # 1. 魔法强化：用铁律约束 AI
         prompt = """
         这是演讲幻灯片的下一页图片，请提取它的核心演讲主题，用于提词器。
         必须严格遵守以下 3 条铁律：
@@ -83,36 +77,38 @@ def get_image_summary(image_bytes):
         2. 绝对不要使用任何标点符号（包括句号、逗号、冒号等）！
         3. 直接输出核心词，绝不能出现“这张图片展示了”、“核心内容是”等废话。
         正确示例：年度销售数据盘点
-        错误示例：这张图是关于年度销售数据的。
         """
         
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=[prompt, img_part]
-        )
-        
-        # 2. 物理净化：拿到结果后，用代码强行洗掉所有标点和废话
-        result = response.text.strip()
-        
-        # 过滤掉常见的前缀废话
-        prefixes_to_remove = ["图片展示了", "核心是", "这张图", "核心内容是", "下一页内容是", "主要展示", "总结：", "提示："]
-        for prefix in prefixes_to_remove:
-            if result.startswith(prefix):
-                result = result[len(prefix):]
+        # 【核心修复2】：内置 3 次自动重试机制，强力抵抗网络抖动与接口频控
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=[prompt, img_part]
+                )
+                result = response.text.strip()
                 
-        # 使用正则表达式：只保留中文字符、英文字母和数字，强制干掉所有标点符号和空格换行
-        result = re.sub(r'[^\w\u4e00-\u9fa5]', '', result)
-        
-        # 强制截断：宁可少字，绝不多字，严格控制在 10 字以内
-        if len(result) > 10:
-            result = result[:10]
-            
-        return result
-    except Exception as e:
-        print(f"解析错误: {e}")
+                # 物理洗刷废话
+                prefixes_to_remove = ["图片展示了", "核心是", "这张图", "核心内容是", "下一页内容是", "主要展示", "总结：", "提示："]
+                for prefix in prefixes_to_remove:
+                    if result.startswith(prefix):
+                        result = result[len(prefix):]
+                        
+                # 剃光标点
+                result = re.sub(r'[^\w\u4e00-\u9fa5]', '', result)
+                if len(result) > 10: result = result[:10]
+                return result
+            except Exception as api_err:
+                print(f"Gemini 接口第 {attempt+1} 次尝试失败: {api_err}")
+                time.sleep(1.5) # 稍微静置后重试
+                
         return "解析失败"
+    except Exception as e:
+        print(f"图片参数封装失败: {e}")
+        return "解析失败"
+
 # ==========================================
-# 4. 飞书数据引擎 (读取与回写)
+# 4. 飞书数据底座
 # ==========================================
 def get_feishu_token():
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
@@ -126,7 +122,6 @@ def download_fs_media(file_token, token):
     return r.content if r.status_code == 200 else None
 
 def update_feishu_cell(ss_token, sheet_id, row_index, text, token):
-    """【回写引擎】将摘要写回 D 列"""
     col_name = "D"
     range_str = f"{sheet_id}!{col_name}{row_index+1}:{col_name}{row_index+1}"
     url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values"
@@ -149,46 +144,49 @@ def parse_link(url_link, token):
     return ss_token, sheet_id, "OK"
 
 # ==========================================
-# ==========================================
-# 5. 引擎 A：自动生成表格摘要并回写 D 列
+# 5. 🛠 引擎 A：【流式动态反馈版】自动生成表格摘要并回写 D 列
 # ==========================================
 def generate_summaries_handler(link):
-    if not link: return "⚠️ 请先粘贴链接"
+    if not link:
+        yield "⚠️ 请先粘贴链接"
+        return
+    
+    # 使用 yield 实现即时视觉反馈
+    yield "🔄 [1/4] 正在获取飞书云端安全授权..."
     token = get_feishu_token()
+    
+    yield "🔄 [2/4] 正在穿透多维表格/知识库节点..."
     ss_token, sheet_id, msg = parse_link(link, token)
-    if not ss_token: return msg
+    if not ss_token:
+        yield f"❌ 连接失败: {msg}"
+        return
     
-    # 增加调试日志
-    print(f"开始处理表格: {ss_token}, 工作表: {sheet_id}")
-    
-    # 强制读取 A1 到 Z500，确保覆盖范围
+    yield "🔄 [3/4] 正在拉取 A1:Z500 全量数据矩阵..."
     data_url = f"https://open.feishu.cn/open-apis/sheets/v2/spreadsheets/{ss_token}/values/{sheet_id}!A1:Z500?valueRenderOption=Formula"
     headers = {"Authorization": f"Bearer {token}"}
     raw_data = requests.get(data_url, headers=headers).json().get("data", {}).get("valueRange", {}).get("values", [])
     
-    if not raw_data: return "❌ 无法读取表格内容，请检查权限。"
+    if not raw_data:
+        yield "❌ 未能在该工作表中读取到有效数据，请检查文档是否为空或机器人权限。"
+        return
 
     processed_count = 0
-    # 我们不再完全相信 B 列一定是索引 1，我们遍历前几列去“搜寻”图片
-    # 或者如果你确定是 B 列，请确保 img_col = 1
-    img_col = 1 
+    img_col = 1 # B 列
+    total_rows = len(raw_data)
     
+    yield f"📊 [4/4] 成功加载！共发现 {total_rows} 行数据。开始启动 AI 视觉引擎逐行解析..."
+    time.sleep(0.5)
+
     for i, row in enumerate(raw_data):
-        # 即使行长度不够，我们也补齐它，防止漏掉
-        if len(row) <= img_col:
-            continue
-            
+        if len(row) <= img_col: continue
         cell_data = row[img_col]
         file_token = None
         
-        # --- 深度提取 Token 逻辑 ---
+        # 深度检索 Token
         def find_token(data):
-            """递归搜索数据中的图片 Token"""
             if isinstance(data, dict):
-                # 飞书 JPG 图片常用的几个 Key
                 for key in ['fileToken', 'imageToken', 'token', 'file_token']:
                     if data.get(key): return data.get(key)
-                # 如果字典里还有列表（比如多附件），递归进去
                 for val in data.values():
                     res = find_token(val)
                     if res: return res
@@ -201,22 +199,28 @@ def generate_summaries_handler(link):
         file_token = find_token(cell_data)
         
         if file_token:
-            print(f"第 {i+1} 行发现图片 Token: {file_token}")
+            # 动态反馈正在处理哪一行，让用户心中有数
+            yield f"⏳ 正在深度解析第 {i+1}/{total_rows} 行的单元格图片..."
             img_bytes = download_fs_media(file_token, token)
             if img_bytes:
                 summary = get_image_summary(img_bytes)
-                if summary:
+                # 只有真正生成了有效文字才写回，防止用“解析失败”四个字污染用户的干净表格
+                if summary and summary != "解析失败":
                     update_feishu_cell(ss_token, sheet_id, i, summary, token)
                     processed_count += 1
+                    yield f"✨ 进展：第 {i+1} 行图片成功识别为 ➡️【{summary}】"
+                else:
+                    yield f"⚠️ 警告：第 {i+1} 行图片多轮重试后依然无法识别，已安全跳过。"
             else:
-                print(f"第 {i+1} 行图片下载失败，请检查下载权限。")
-        else:
-            # 只有在真的找不到时才打印，避免刷屏
-            if i < 5: print(f"第 {i+1} 行 B 列内容预览: {cell_data}")
+                yield f"❌ 阻碍：第 {i+1} 行图片文件流下载失败，请检查飞书后台‘导出附件’权限。"
+        
+        # 引入 0.2 秒科学微休眠，优雅规避并发频控
+        time.sleep(0.2)
+                    
+    yield f"🎉 **全篇大功告成！** 成功在 D 列回写了 {processed_count} 条极致精简的下一页提示词。请刷新飞书表格查阅！"
 
-    return f"✅ 处理完毕！成功在 D 列回写 {processed_count} 条摘要。如果依然为 0，请查看 VS Code 终端打印的‘内容预览’。"
 # ==========================================
-# 6. 引擎 B：导出智能 PPT (左下角红框，C列正文，D列摘要)
+# 6. 🚀 引擎 B：导出智能 PPT (C列正文，下行D列摘要)
 # ==========================================
 def export_ppt_handler(link, col_letter):
     if not link: return None, "⚠️ 请先粘贴链接"
@@ -264,7 +268,7 @@ def export_ppt_handler(link, col_letter):
                 else:
                     next_hint = str(hint_val).strip()
                 
-                if not next_hint or next_hint == "None":
+                if not next_hint or next_hint == "None" or next_hint == "解析失败":
                     next_hint = "演讲结束"
 
         # C. 渲染 Slide
@@ -320,10 +324,10 @@ def export_ppt_handler(link, col_letter):
 # 7. UI 界面整合
 # ==========================================
 with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
-    gr.Markdown("# 🚀 AI 智能文档工作站 V5.6 (全能版)")
+    gr.Markdown("# 🚀 AI 智能文档工作站 V5.6 (高阶反馈版)")
     
     with gr.Tabs():
-        # --- 保留的 Tab 1：纠错校对 ---
+        # --- Tab 1：纠错校对 ---
         with gr.TabItem("📝 AI 语言处理"):
             with gr.Row():
                 with gr.Column():
@@ -338,7 +342,7 @@ with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
             btn_proof.click(fn=lambda f: process_ai_task(f, prompt_proofread), inputs=ai_file, outputs=ai_output)
             btn_trans.click(fn=lambda f: process_ai_task(f, prompt_translate), inputs=ai_file, outputs=ai_output)
 
-        # --- 全新的 Tab 2：飞书双引擎 ---
+        # --- Tab 2：飞书双引擎 ---
         with gr.TabItem("🎬 飞书一键转 PPT"):
             gr.Markdown("### 双步工作流：1. 读取 B 列图片生成摘要写回 D 列 ➡️ 2. 读取 C 列正文与下页 D 列生成 PPT")
             with gr.Row():
@@ -357,6 +361,7 @@ with gr.Blocks(title="AI 智能文档工作站 V5.6") as demo:
                     ppt_file = gr.File(label="下载导出的 PPT")
                     export_status = gr.Markdown("状态：等待指令")
 
+            # 注意：此处 generate_summaries_handler 升级为流式生成器，会自动刷新状态框
             summary_btn.click(fn=generate_summaries_handler, inputs=link_input, outputs=summary_status)
             export_btn.click(fn=export_ppt_handler, inputs=[link_input, col_input], outputs=[ppt_file, export_status])
 
